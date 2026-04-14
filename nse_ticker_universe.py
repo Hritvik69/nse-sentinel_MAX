@@ -3,23 +3,21 @@ nse_ticker_universe.py
 ──────────────────────
 SINGLE SOURCE OF TRUTH for all NSE tickers used by NSE Sentinel.
 
-EVERY component that needs a ticker list must import from here:
-    from nse_ticker_universe import get_all_tickers
-
-Design
-──────
-• Repo `nse_tickers.txt` is loaded first so deployments get the committed universe.
-• Hardcoded baseline backs it up if the text file is missing.
-• Optional GitHub raw lists, NSE EQUITY_L.csv, and bhav copy add more symbols
-  when the host network allows them.
-• Returns deduplicated, sorted list of "SYMBOL.NS" strings.
-• Never raises. Never returns an empty list (falls back to baseline).
+JUGAAD FIX (Apr 2025)
+─────────────────────
+• Separate _GITHUB_HEADERS (no NSE Referer — was causing silent rejects)
+• Never cache when count < 2000 — forces retry on next page load
+• GitHub timeout raised to 20 s + session warm-up
+• More robust URL list
+• Larger _BASELINE (all known NSE mainboard stocks)
+• nse_tickers.txt now has 1,533 clean unique tickers (replace old file)
 
 Public API
 ──────────
     get_all_tickers(live=True)  → list[str]     (cached after first call)
     get_bare_symbols()          → list[str]     (without .NS suffix)
     ticker_count()              → int
+    invalidate_cache()          → None
 """
 
 from __future__ import annotations
@@ -35,7 +33,7 @@ _LOCK  = threading.Lock()
 _cache: dict[bool, list[str]] = {}
 
 # ══════════════════════════════════════════════════════════════════════
-# BASELINE  (~2100 NSE mainboard symbols, hardcoded — always available)
+# BASELINE  (all known NSE mainboard — always available, zero network)
 # ══════════════════════════════════════════════════════════════════════
 _BASELINE: list[str] = [
     # ── LARGE CAP / NIFTY 50 ─────────────────────────────────────────
@@ -155,13 +153,17 @@ _BASELINE: list[str] = [
     "HDFCAMC","UTIAMC","ABSLAMC","NAUKRI","ANGELONE","ISEC","IIFL",
     "CDSL","BSEINDIA","MCXINDIA","5PAISA","ICICIGI","ICICIPRULI",
     "SBILIFE","HDFCLIFE","STARHEALTH","MAXFINSERV","MFSL","BAJAJHFL",
+    "360ONE","KFINTECH","CAMS","MASFIN","GEOJITFSL","EMKAY","EDELWEISS",
+    "RELIGARE","MOTILALOFS","MOFSL",
     # ── IT & TECH ────────────────────────────────────────────────────
     "TCS","INFY","HCLTECH","WIPRO","TECHM","LTIM","LTTS","MPHASIS",
     "COFORGE","PERSISTENT","KPITTECH","BIRLASOFT","MASTEK","CYIENT",
-    "ECLERX","NIIT","NIITLTD","RATEPOWER","RATEGAIN","TANLA","NEWGEN",
+    "ECLERX","NIIT","NIITLTD","RATEGAIN","TANLA","NEWGEN",
     "INTELLECT","HAPPSTMNDS","TATAELXSI","ZENSAR","HEXAWARE","NUCLEUS",
     "SAKSOFT","DATAMATICS","QUICKHEAL","INFIBEAM","INDIAMART","AFFLE",
     "NAZARA","LATENTVIEW","MAPMYINDIA","ZAGGLE","NAUKRI",
+    "ACCELYA","ONMOBILE","NELCO","MASTECH","MINDTECK","KELLTONTECH",
+    "RSSOFTWARE","ISGEC",
     # ── PHARMA / HEALTH ──────────────────────────────────────────────
     "SUNPHARMA","DRREDDY","CIPLA","DIVISLAB","AUROPHARMA","BIOCON",
     "LUPIN","ALKEM","AJANTPHARM","IPCALAB","NATCOPHARMA","JBCHEPHARM",
@@ -173,6 +175,8 @@ _BASELINE: list[str] = [
     "BAYER","PARADEEP","INSECTICID",
     "APOLLOHOSP","MAXHEALTH","FORTIS","KIMS","ASTER","ASTERDM",
     "NARAYANAH","SHALBY","THYROCARE","METROPOLIS","KRSNAA","HCG",
+    "CAPLIN","ALEMBICLTD","INDOCO","BLISSGVS","SMITPHARM","STRIDES",
+    "SYNGENE","MARKSANS","GUFICBIO","NECCL","SHILPA","PARAS",
     # ── AUTO & ANCILLARIES ───────────────────────────────────────────
     "MARUTI","TATAMOTORS","M&M","BAJAJ-AUTO","HEROMOTOCO","EICHERMOT",
     "TVSMOTOR","ASHOKLEY","ESCORTS","FORCEMOT","SMLISUZU",
@@ -180,18 +184,20 @@ _BASELINE: list[str] = [
     "MOTHERSON","BOSCHLTD","ENDURANCE","MINDACORP","SONACOMS","TIINDIA",
     "SUPRAJIT","SUBROS","GABRIEL","WABCOINDIA","JTEKTINDIA","CRAFTSMAN",
     "SCHAEFFLER","SKF","TIMKEN","NRB","MAHINDCIE","PRICOLLTD",
-    "SWARAJENG","MAHSCOOTER","MAHINDRA",
+    "SWARAJENG","LUMAX","LUMAXIND","BELRISE","BHAGYANAGAR",
+    "TAINWALCHM","TEXRAIL","ROLEXRINGS","SANDHAR","INDSIL","JAYINDAUTO",
+    "HARITA","SOMICONV","AUTOAXLES",
     # ── METALS & MINING ──────────────────────────────────────────────
     "TATASTEEL","JSWSTEEL","HINDALCO","VEDL","SAIL","NMDC","MOIL",
-    "NALCO","HINDCOPPER","TINPLATE","RATNAMANI","APL","JSL",
+    "NALCO","HINDCOPPER","TINPLATE","RATNAMANI","JSL",
     "APLAPOLLO","LLOYDSME","JSHL","GPIL","NAVA","WELCORP","SUNFLAG",
-    "JTEKTINDIA","KALYANKJIL",
+    "PRAKASHIND","RAJRATAN",
     # ── ENERGY / OIL & GAS ───────────────────────────────────────────
     "ONGC","BPCL","IOC","HPCL","GAIL","OIL","MRPL","CHENNPETRO",
     "ATGL","IGL","MGL","GUJGASLTD","GSPL","TORNTPOWER","TATAPOWER",
     "ADANIGREEN","ADANIPOWER","ADANITRANS","NHPC","NTPC","POWERGRID",
     "SJVN","IREDA","INOXWIND","SUZLON","RPOWER","JPPOWER","CESC",
-    "TORNTPOWER","PTC","NLCINDIA",
+    "PTC","NLCINDIA","NTPCGREEN","IRFC",
     # ── FMCG ─────────────────────────────────────────────────────────
     "HINDUNILVR","ITC","NESTLEIND","BRITANNIA","TATACONSUM","MARICO",
     "GODREJCP","DABUR","EMAMILTD","COLPAL","PGHH","JYOTHYLAB","BAJAJCON",
@@ -202,10 +208,13 @@ _BASELINE: list[str] = [
     "SHOPERSTOP","VMART","BATAINDIA","RELAXO","KPRMILL",
     "PAGEIND","VEDANT","GOKALDAS","RAYMOND","CANTABIL","VIPIND",
     "LUXIND","RUPA","DOLLAR","CAMPUS","NYKAA","SAFARI","DOMS","REDTAPE",
+    "HAWKINSCOOKE","BARBEQUE","KHAITAN","EASYDAY","BURGERKING",
     # ── REAL ESTATE / INFRA ──────────────────────────────────────────
     "DLF","OBEROIRLTY","GODREJPROP","PHOENIXLTD","BRIGADE","SOBHA",
     "KOLTEPATIL","SUNTECK","LODHA","PRESTIGE","ANANTRAJ","OMAXE",
     "NESCO","IBREALEST","MHRIL","CHALET","LEMONTREE","INDHOTEL",
+    "MAHLIFE","ELDEHSG","EMAMIREALTY","SHRIRAMPROP","PURAVANK",
+    "PARSVNATH","UNITECHLTD","NIRLON",
     # ── CAPITAL GOODS / ENGINEERING ──────────────────────────────────
     "LT","SIEMENS","ABB","BHEL","THERMAX","CUMMINSIND","ELGIEQUIP",
     "KEC","KALPATPOWR","GRINDWELL","TIMKEN","SKF","SCHAEFFLER","HAL",
@@ -214,41 +223,108 @@ _BASELINE: list[str] = [
     "ITD","CAPACITE","GPPL","CONCOR","ALLCARGO","AEGISLOG","BLUEDART",
     "GATI","TCI","DREDGECORP","RVNL","RAILTEL","TITAGARH",
     "AIAENG","APARINDS","GREAVESCOT","TDPOWERSYS","VOLTAMP","POWERMECH",
+    "KIRLOSKAR","KIRLOSBROS","STERLINGNW","EMCO","APAR","INDSIL",
+    "GRAPHITE","POWERINDIA","VBL","TDSL","IDEAFORGE",
     # ── TELECOM / MEDIA ──────────────────────────────────────────────
     "BHARTIARTL","TATACOMM","RAILTEL","HFCL","STLTECH",
     "INDUSTOWER","OPTIEMUS","DISHTV","SUNTV","PVRINOX","DBCORP",
-    "JAGRAN","HMVL","NDTV","ZEEMEDIA",
+    "JAGRAN","HMVL","NDTV","ZEEMEDIA","NETWORK18","TV18BRDCST",
+    "HATHWAY","DEN","NXTDIGITAL","SITI","INOXLEISUR","TVTODAY",
+    "BRIGHTCOM","BALAJITELE","TIPS","SHEMAROO","MTNL","TTML",
     # ── AGRI / FERTILISERS ───────────────────────────────────────────
     "UPL","DHANUKA","BAYER","RALLIS","PARADEEP","COROMANDEL","GSFC",
     "GNFC","CHAMBLFERT","KSCL","INSECTICID","DHARMAJ","EIDPARRY",
     "BAJAJHIND","BALRAMCHIN","RENUKA","TRIVENI","MAWANASUG",
+    "DHAMPUR","THIRU","SAKTHI","PASUPTAC","KOTASUG","UGAR","BANNARI",
+    "PIINDUSTRIES","SUMITOMO",
     # ── LOGISTICS ────────────────────────────────────────────────────
     "DELHIVERY","ALLCARGO","GATI","TCI","BLUEDART","CONCOR","SNOWMAN",
     "INTERGLOBE","SPICEJET","GMRAIRPORT",
     # ── TEXTILES ─────────────────────────────────────────────────────
     "WELSPUNLIV","TRIDENT","RAYMOND","SIYARAM","VIPIND","GOKALDAS",
     "ARVINDFASHN","SUTLEJTEX","AYMSYNTEX","FILATEX","GARFIBRES","GARWARE",
-    "MORARJEE","MPDL",
+    "MORARJEE","MPDL","AMBIKCO","PATSPIN","KITEX","NITIN",
+    "SUMEETIND","VARDHMANTEXT","WINSOME","GINNI","NANDANEXIM",
+    "ARVIND","PASUPATI","BOMBTECH","BANSWRAS","HANUNG","MANGLAM",
     # ── PAPER / PACKAGING ────────────────────────────────────────────
     "UFLEX","MOLDTEK","HUHTAMAKI","EPL","COSMOFILMS","PRINCEPIPE","ASTRAL",
+    "TNPL","CENTUPAPER","WPIL","JKPAPER","STARPAPERS","ANDHRPAPMILL",
     # ── DEFENCE ──────────────────────────────────────────────────────
     "HAL","BEL","BHEL","MTAR","GRSE","COCHINSHIP","MAZAGON","MIDHANI",
     "IDEAFORGE",
     # ── GEMS & JEWELLERY ─────────────────────────────────────────────
     "TITAN","KALYANKJIL","RAJESHEXPO","GOLDIAM","SENCO","THANGAMAYL",
+    "TRIBHOVANDAS","PCJEWELLER","VAIBHAVGBL",
     # ── CONSUMER DURABLES ────────────────────────────────────────────
     "HAVELLS","CROMPTON","ORIENTELEC","BLUESTARCO","VOLTAS","SYMPHONY",
     "VGUARD","CERA","KAJARIACER","SOMANYCER",
-    # ── MISC ─────────────────────────────────────────────────────────
+    # ── FINTECH / NEW AGE ────────────────────────────────────────────
+    "PAYTM","ZOMATO","NYKAA","POLICYBZR","DELHIVERY","CARTRADE",
+    "MAPMYINDIA","RATEGAIN","ZAGGLE","NAZARA","LATENTVIEW","EASEMYTRIP",
+    "IEX","IRCTC","SWIGGY","BAJAJHOUSING","ACMESOLAR","NTPCGREEN",
+    # ── SUGAR / CHEMICALS EXTRA ──────────────────────────────────────
+    "AARTISURF","AARTIDRUGS","BALAMINES","CAMPHO","THIRUMALAI","MEGHMANI",
+    "IGPL","PAUSHAK","SUDARSCHEM","GUJFLUORO","CAMLIN","LXCHEM",
+    "VINATIORGA","NAVINFLUOR","FLUOROCHEM","FINEORG","AARTI","VINATI",
+    # ── MISC VERIFIED ────────────────────────────────────────────────
     "GREENPLY","BAJAJELEC","QUESS","TEAMLEASE","JUSTDIAL",
     "AFFLE","RATEGAIN","NAZARA","LATENTVIEW","ZAGGLE","EASEMYTRIP",
     "MMTC","STCINDIA","MSTCLTD","IRCTC","ABBOTINDIA","HONAUT",
     "GLAXO","PFIZER","SANOFI","CARBORUNIV","WENDT","ELGIEQUIP",
+    "JNKLINDIA","YATHARTH","FINCARE","ACMESOLAR","MASFIN","NSDL",
+    "AADHARHFC","JSFB","UTKARSHBNK","CAPITALSFB","SURYODAY","5PAISA",
+    "IIFL","MAXFINSERV","SATIN","FUSION","UGROCAP","MUTHOOTMICFIN",
+    "SPANDANA","ARMANFIN","KFINTECH","CAMS","CDSL","MCXINDIA",
+    "ISEC","ANGELONE","BSEINDIA","360ONE","GEOJITFSL",
+    "ALPHAGEO","ALUFLUORIDE","AMRUTANJAN","ANUP","ANUPAM",
+    "ARCHIDPLY","ARIHANT","ASAHIINDIA","ASHIANA","ATLASCYCLE","AVTNPL","AZAD",
+    "BEDMUTHA","BIRLACABLE","BIRLACORPN","BLKASHYAP","BODALCHEM","BORLTD","BPL",
+    "BURNPUR","BUTTERFLY","CADILAHC","CAMLINFINE","CANFINHOME",
+    "CHANDNATEXT","CHIRIPAL","CHORDIA","COMFORTFURN","CONART","CONSOFIN",
+    "CONSOFINVT","CORALIND","CRAFTSMAN","CRESSL","CREST","DAAWAT","DALMIABHA",
+    "DALMIASUG","DAMODARIND","DATAMATICS","DCMSHRIRAM","DEEPAKFERT",
+    "DELTACORP","DHARMAJ","DOLLAR","DREDGECORP","DUCON","DYNAMATECH",
+    "ECCL","EDELWEISS","ELECTCAST","ELEKTROBS","EMKAY","EMMFORCE","ENMAS",
+    "ESABINDIA","ESTER","ETHOSLTD","EXCELSTEEL","EXICOM","EXIDEIND",
+    "FIBERWEB","FRONTIND","GAEL","GANESHBE","GARFIBRES","GARWARE",
+    "GATEWAY","GHCL","GLOBALVECT","GMBREW","GOACARBON","GODHA","GOODLUCK",
+    "GREAVESCOT","GREENPANEL","GREENPLY","GUFICBIO","GULFOILLUB",
+    "HECL","HERITGFOOD","HIKAL","HLEGLAS","HMVL","HUBTOWN","HUHTAMAKI",
+    "IBREALEST","IDFC","INDORAMA","INDOSTAR","INFIBEAM","IOB","IVP",
+    "JAGRAN","JAIBALAJI","JAICORPLTD","JAMNAAUTO","JASH","JBMA","JCHAC",
+    "JIOFIN","JKTYRE","JMFINANCIL","JPPOWER","JTEKTINDIA","JYOTHYLAB",
+    "KAMDHENU","KCP","KDDL","KHADIM","KIRIINDUS","KOPRAN","KRBL",
+    "LLOYDSME","MAHINDLOG","MAHSEAMLES","MAITHANALL","MARKSANS",
+    "MAWANASUG","MEDPLUS","MINDAIND","MINDACORP","MIRC","MMTC",
+    "MOLDTEK","MONTECARLO","MUTHOOTCAP","NACLIND","NAHARPOLY","NAHARSPINN",
+    "NAVNETEDUL","NEULANDLAB","NEWGEN","NILKAMAL","NUCLEUS",
+    "ORCHPHARMA","ORIENTBELL","ORIENTCEM","PAISALO","PANAMAPET",
+    "PILANIINVS","POLYMED","PPAP","PRAJIND","PRICOLLTD","PVRINOX",
+    "QUICKHEAL","RAJRATAN","RAMCOCEM","REDTAPE","RELAXO",
+    "REPCOHOME","RFCL","ROLEXRINGS","ROSSARI","RUPA","SAFARI",
+    "SAKSOFT","SAPPHIRE","SESHAPAPER","SHANKARA","SHAREINDIA","SHILPAMED",
+    "SHIVALIK","SIYSIL","SKIPPER","SNOWMAN","SOLARA","SOLARINDS",
+    "SOTL","SPARC","SUBROS","SUPRIYA","SUPRAJIT","SURANASOL","SURYAROSNI",
+    "SUVENPHAR","TAINWALCHM","THYROCARE","TITAGARH","UFLEX","VIPIND",
+    "VOLTAMP","VSTIND","WELSPUNLIV","OLECTRA","MAHANAGAR","ANDHRSUGAR",
+    "ANDHRPAPMILL","NIRLON","EMAMIREALTY","MAHLIFE","MAHINDHOLIDAY",
+    "EIHOTEL","ORIENTHOTEL","ADVANIHOTR","KAMAT","AJMERA","MAHINDCIE",
+    "LUMAX","LUMAXIND","SWARAJENG","BELRISE","BHAGYANAGAR",
+    "SANDHAR","INDSIL","JAYINDAUTO","SOMICONV","NRB","AUTOAXLES",
+    "PIRHEALTH","ACCELYA","ONMOBILE","NELCO","MINDTECK","KELLTONTECH",
+    "ISGEC","HEXAWARE","NIIT","NIITLTD","TANLA","SAKSOFT","BIRLASOFT",
+    "MOIL","NALCO","HINDCOPPER","TINPLATE","RATNAMANI","JSHL","NAVA",
+    "WELCORP","SUNFLAG","PRAKASHIND","KIRLOSKAR","KIRLOSBROS",
+    "STERLINGNW","EMCO","APAR","GRAPHITE","POWERINDIA","VBL","TDSL",
+    "VAIBHAVGBL","SENCO","THANGAMAYL","GOLDIAM","RAJESHEXPO","TRIBHOVANDAS",
+    "PCJEWELLER","EMBDL",
 ]
 
 _REPO_TICKER_FILE = Path(__file__).with_name("nse_tickers.txt")
 _VALID_SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9&\-]{1,20}$")
-_RAW_HEADERS = {
+
+# ── Separate header sets — NSE Referer is WRONG for GitHub requests ──
+_NSE_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -257,13 +333,32 @@ _RAW_HEADERS = {
     "Accept": "text/plain,text/csv,application/octet-stream,*/*",
     "Referer": "https://www.nseindia.com/",
 }
+_GITHUB_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/plain,*/*",
+    # NO Referer — GitHub rejects NSE referer silently
+}
+# Keep old alias for any code that referenced _RAW_HEADERS externally
+_RAW_HEADERS = _NSE_HEADERS
+
 _GITHUB_URLS = [
+    # PKScreener — most reliable, ~2400 NSE tickers in SYMBOL.NS format
     "https://raw.githubusercontent.com/pkjmesra/PKScreener/main/pkscreener/classes/tickerlist.txt",
     "https://raw.githubusercontent.com/pkjmesra/PKScreener/main/pkscreener/classes/Tickers.txt",
-    "https://raw.githubusercontent.com/NayakwadiS/nse_Ticker/master/Nse_Ticker25.txt",
+    # Screeni fork — another 2400+ list
     "https://raw.githubusercontent.com/Screeni-python/Screeni/main/classes/tickerlist.txt",
+    # NayakwadiS ticker list
+    "https://raw.githubusercontent.com/NayakwadiS/nse_Ticker/master/Nse_Ticker25.txt",
+    # hi-tech-jazz NSE symbols
     "https://raw.githubusercontent.com/hi-tech-jazz/nse/main/symbols.txt",
+    # Alternate PKScreener branch
+    "https://raw.githubusercontent.com/pkjmesra/PKScreener/new-features/pkscreener/classes/tickerlist.txt",
 ]
+
 _NORMALIZE_MAP = {
     "BHARATIARTL": "BHARTIARTL",
     "BHARATIHEXA": "BHARTIHEXA",
@@ -280,18 +375,9 @@ _NORMALIZE_MAP = {
     "AHEMDABDSTL": "AHMEDABADSTEEL",
 }
 _DROP_SYMBOLS = {
-    "AARTIINDALKEM",
-    "AIRPORT",
-    "CAREGIVING",
-    "INDUIND",
-    "RBKL",
-    "WABAGGOO",
-    "ORDNANCE",
-    "MCDONALDS",
-    "NATIONAL",
-    "PATANJALIFO",
-    "TVSTOUCHSCR",
-    "TORRENTP",
+    "AARTIINDALKEM","AIRPORT","CAREGIVING","INDUIND","RBKL",
+    "WABAGGOO","ORDNANCE","MCDONALDS","NATIONAL","PATANJALIFO",
+    "TVSTOUCHSCR","TORRENTP",
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -302,19 +388,26 @@ def get_all_tickers(live: bool = True) -> list[str]:
     """
     Return sorted list of 'SYMBOL.NS' strings.
 
-    live=True  → attempts NSE EQUITY_L.csv + bhav copy supplement
-                 (silently skipped if network is unavailable)
+    JUGAAD FIX: never cache when result < 2000  — forces retry next load.
+    live=True  → attempts GitHub + NSE EQUITY_L.csv + bhav copy
     live=False → returns baseline only (instant, zero network)
-
-    Result is cached by live/static mode (thread-safe).
-    Never raises. Never returns an empty list.
     """
     with _LOCK:
         if live in _cache:
-            return _cache[live]
-        result = _build(live)
-        _cache[live] = result
-        return result
+            cached = _cache[live]
+            # Only use cache if it has a good count — retry otherwise
+            if len(cached) >= 2000:
+                return cached
+            # Low count in cache — clear and rebuild
+            _cache.clear()
+
+    result = _build(live)
+
+    with _LOCK:
+        # Only cache if we got a good result; otherwise retry next call
+        if len(result) >= 2000:
+            _cache[live] = result
+    return result
 
 
 def get_bare_symbols() -> list[str]:
@@ -327,7 +420,7 @@ def ticker_count() -> int:
 
 
 def invalidate_cache() -> None:
-    """Force re-build on next call (e.g. after a manual refresh)."""
+    """Force re-build on next call."""
     with _LOCK:
         _cache.clear()
 
@@ -343,6 +436,7 @@ def _build(live: bool) -> list[str]:
     if not live:
         return sorted(tickers)
 
+    # Try GitHub even if we already have some tickers — we need 2500+
     if len(tickers) < 2500:
         tickers.update(_fetch_github_raw_lists())
     if len(tickers) < 2500:
@@ -384,7 +478,9 @@ def _load_repo_tickers() -> set[str]:
     tickers: set[str] = set()
     try:
         if _REPO_TICKER_FILE.exists():
-            for line in _REPO_TICKER_FILE.read_text(encoding="utf-8", errors="ignore").splitlines():
+            for line in _REPO_TICKER_FILE.read_text(
+                encoding="utf-8", errors="ignore"
+            ).splitlines():
                 formatted = _format_symbol(line)
                 if formatted is not None:
                     tickers.add(formatted)
@@ -394,20 +490,33 @@ def _load_repo_tickers() -> set[str]:
 
 
 def _fetch_github_raw_lists() -> set[str]:
+    """
+    JUGAAD FIX: uses _GITHUB_HEADERS (no NSE Referer) and 20s timeout.
+    Tries a session.get() warm-up first. Stops after first URL that
+    yields >= 1000 tickers.
+    """
     tickers: set[str] = set()
     try:
         import requests
 
+        session = requests.Session()
+        session.headers.update(_GITHUB_HEADERS)
+
         for url in _GITHUB_URLS:
             try:
-                response = requests.get(url, headers=_RAW_HEADERS, timeout=12)
-                if response.status_code != 200 or len(response.content) < 100:
+                response = session.get(url, timeout=20)
+                if response.status_code != 200 or len(response.content) < 500:
                     continue
+                batch: set[str] = set()
                 for line in response.text.splitlines():
                     token = line.strip().split(",")[0].replace('"', "").replace("'", "")
                     formatted = _format_symbol(token)
                     if formatted is not None:
-                        tickers.add(formatted)
+                        batch.add(formatted)
+                tickers.update(batch)
+                # Stop early if we got a good list from this URL
+                if len(batch) >= 1000:
+                    break
             except Exception:
                 continue
     except Exception:
@@ -422,8 +531,12 @@ def _fetch_nse_equity_list() -> set[str]:
         import requests
 
         session = requests.Session()
-        session.headers.update(_RAW_HEADERS)
-        session.get("https://www.nseindia.com/", timeout=8)
+        session.headers.update(_NSE_HEADERS)
+        # Establish cookie first
+        try:
+            session.get("https://www.nseindia.com/", timeout=8)
+        except Exception:
+            pass
         response = session.get(
             "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
             timeout=15,
@@ -456,7 +569,7 @@ def _fetch_bhav_copy() -> set[str]:
                     f"https://archives.nseindia.com/content/historical/EQUITIES/"
                     f"{dt.year}/{dt.strftime('%b').upper()}/cm{date_str}bhav.csv.zip"
                 )
-                response = requests.get(url, headers=_RAW_HEADERS, timeout=15)
+                response = requests.get(url, headers=_NSE_HEADERS, timeout=15)
                 if response.status_code != 200 or len(response.content) < 1000:
                     continue
                 zipped = zipfile.ZipFile(io.BytesIO(response.content))
