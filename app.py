@@ -871,7 +871,7 @@ hr { border-color:var(--border) !important; }
 # ─────────────────────────────────────────────────────────────────────
 # NSE TICKER LOADER
 # ─────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)   # FIX: 24 h (was 6 h)
 def fetch_nse_tickers() -> list:
     """
     Load the scan universe from the shared ticker-universe module.
@@ -881,6 +881,9 @@ def fetch_nse_tickers() -> list:
     - its curated hardcoded fallback list
     - GitHub raw ticker lists when reachable
     - NSE direct endpoints when reachable
+
+    FIX: result is also stored in st.session_state as a permanent
+    backup so that a TTL-expiry mid-session never drops the count.
     """
     fallback = [
         "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS","HINDUNILVR.NS",
@@ -895,6 +898,15 @@ def fetch_nse_tickers() -> list:
         "BAJAJ-AUTO.NS","TATASTEEL.NS","UPL.NS","M&M.NS",
     ]
 
+    # ── FIX: session-state fast-path ─────────────────────────────────
+    # If we already have a large list in this session (from a previous
+    # call before TTL expiry), return it immediately without any network
+    # call.  This prevents the 2985 → 1524 drop that happens when the
+    # 6-hour cache expires and GitHub is rate-limited.
+    _ss_tickers = st.session_state.get("_full_ticker_list", [])
+    if len(_ss_tickers) >= 2000:
+        return _ss_tickers
+
     try:
         from nse_ticker_universe import get_all_tickers as _get_all_tickers
         from nse_ticker_universe import invalidate_cache as _invalidate_ticker_cache
@@ -906,6 +918,9 @@ def fetch_nse_tickers() -> list:
         try:
             tickers = _get_all_tickers(live=True)
             if len(tickers) >= 1000:
+                # ── FIX: persist to session_state so TTL-expiry can't hurt ──
+                if len(tickers) >= 2000:
+                    st.session_state["_full_ticker_list"] = tickers
                 return tickers
             if _invalidate_ticker_cache is not None:
                 _invalidate_ticker_cache()
