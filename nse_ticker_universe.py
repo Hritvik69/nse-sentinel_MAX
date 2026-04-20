@@ -437,8 +437,9 @@ def _build(live: bool) -> list[str]:
         return sorted(tickers)
 
     # Try GitHub even if we already have some tickers — we need 2500+
-    if len(tickers) < 2500:
-        tickers.update(_fetch_github_raw_lists())
+    # FIX: always try ALL sources regardless of early count, to maximise list
+    _github_found = _fetch_github_raw_lists()
+    tickers.update(_github_found)
     if len(tickers) < 2500:
         tickers.update(_fetch_nse_equity_list())
     if len(tickers) < 2500:
@@ -446,7 +447,25 @@ def _build(live: bool) -> list[str]:
 
     if not tickers:
         tickers = _baseline_tickers()
-    return sorted(tickers)
+
+    result = sorted(tickers)
+
+    # ── FIX: Write-back ───────────────────────────────────────────────
+    # When we get a large list (≥ 2500), persist ALL symbols back to
+    # nse_tickers.txt.  This means the NEXT cache-refresh (after TTL
+    # expiry or a Streamlit Cloud reboot) finds the full list in the
+    # file and does NOT need to hit GitHub at all, preventing the
+    # 2985 → 1524 regression when GitHub is rate-limited.
+    if len(result) >= 2500:
+        try:
+            bare = [t.replace(".NS", "") for t in result]
+            _REPO_TICKER_FILE.write_text(
+                "\n".join(bare), encoding="utf-8"
+            )
+        except Exception:
+            pass  # read-only FS (shouldn't stop the scan)
+
+    return result
 
 
 def _normalize_symbol(raw: str) -> str | None:
@@ -492,8 +511,8 @@ def _load_repo_tickers() -> set[str]:
 def _fetch_github_raw_lists() -> set[str]:
     """
     JUGAAD FIX: uses _GITHUB_HEADERS (no NSE Referer) and 20s timeout.
-    Tries a session.get() warm-up first. Stops after first URL that
-    yields >= 1000 tickers.
+    Tries a session.get() warm-up first.
+    FIX: Tries ALL URLs (no break-early) to maximise ticker count.
     """
     tickers: set[str] = set()
     try:
@@ -507,16 +526,11 @@ def _fetch_github_raw_lists() -> set[str]:
                 response = session.get(url, timeout=20)
                 if response.status_code != 200 or len(response.content) < 500:
                     continue
-                batch: set[str] = set()
                 for line in response.text.splitlines():
                     token = line.strip().split(",")[0].replace('"', "").replace("'", "")
                     formatted = _format_symbol(token)
                     if formatted is not None:
-                        batch.add(formatted)
-                tickers.update(batch)
-                # Stop early if we got a good list from this URL
-                if len(batch) >= 1000:
-                    break
+                        tickers.add(formatted)
             except Exception:
                 continue
     except Exception:
