@@ -384,27 +384,47 @@ _DROP_SYMBOLS = {
 # PUBLIC API
 # ══════════════════════════════════════════════════════════════════════
 
+_TMP_TICKER_FILE = "/tmp/nse_sentinel_tickers.txt"
+
+
 def get_all_tickers(live: bool = True) -> list[str]:
     """
     Return sorted list of 'SYMBOL.NS' strings.
 
-    JUGAAD FIX: never cache when result < 2000  — forces retry next load.
-    live=True  → attempts GitHub + NSE EQUITY_L.csv + bhav copy
-    live=False → returns baseline only (instant, zero network)
+    Cache priority:
+      1. Module _cache (memory, this Python process)
+      2. /tmp/ file   (written after a successful large fetch;
+                       survives Streamlit reruns within same server)
+      3. Full _build() (GitHub + NSE + repo txt)
+
+    Never caches a result < 2000 — forces retry on next call.
     """
     with _LOCK:
         if live in _cache:
             cached = _cache[live]
-            # Only use cache if it has a good count — retry otherwise
             if len(cached) >= 2000:
                 return cached
-            # Low count in cache — clear and rebuild
             _cache.clear()
+
+    # ── Check /tmp/ before any network call ───────────────────────────
+    if live:
+        try:
+            import os
+            if os.path.exists(_TMP_TICKER_FILE):
+                with open(_TMP_TICKER_FILE, "r", encoding="utf-8") as _fh:
+                    _lines = [l.strip() for l in _fh.read().splitlines() if l.strip()]
+                if len(_lines) >= 2000:
+                    _formatted = sorted(f for f in (_format_symbol(l) for l in _lines) if f)
+                    if len(_formatted) >= 2000:
+                        with _LOCK:
+                            _cache[live] = _formatted
+                        return _formatted
+        except Exception:
+            pass
 
     result = _build(live)
 
     with _LOCK:
-        # Only cache if we got a good result; otherwise retry next call
         if len(result) >= 2000:
             _cache[live] = result
     return result
@@ -436,12 +456,9 @@ def _build(live: bool) -> list[str]:
     if not live:
         return sorted(tickers)
 
-    # Try GitHub even if we already have some tickers — we need 2500+
-    # FIX: always try ALL sources regardless of early count, to maximise list
-    _github_found = _fetch_github_raw_lists()
-    tickers.update(_github_found)
-    if len(tickers) < 2500:
-        tickers.update(_fetch_nse_equity_list())
+    # ── Try ALL sources (no early-break) for maximum coverage ─────────
+    tickers.update(_fetch_github_raw_lists())
+    tickers.update(_fetch_nse_equity_list())
     if len(tickers) < 2500:
         tickers.update(_fetch_bhav_copy())
 
@@ -450,20 +467,23 @@ def _build(live: bool) -> list[str]:
 
     result = sorted(tickers)
 
-    # ── FIX: Write-back ───────────────────────────────────────────────
-    # When we get a large list (≥ 2500), persist ALL symbols back to
-    # nse_tickers.txt.  This means the NEXT cache-refresh (after TTL
-    # expiry or a Streamlit Cloud reboot) finds the full list in the
-    # file and does NOT need to hit GitHub at all, preventing the
-    # 2985 → 1524 regression when GitHub is rate-limited.
-    if len(result) >= 2500:
+    # ── Write-back: persist large list to /tmp/ AND repo txt ──────────
+    # /tmp/ survives Streamlit reruns within the same server process.
+    # repo txt is updated so future cold deploys already have a big list.
+    if len(result) >= 2000:
         try:
-            bare = [t.replace(".NS", "") for t in result]
-            _REPO_TICKER_FILE.write_text(
-                "\n".join(bare), encoding="utf-8"
-            )
+            bare_content = "\n".join(t.replace(".NS", "") for t in result)
+            try:
+                with open(_TMP_TICKER_FILE, "w", encoding="utf-8") as _fh:
+                    _fh.write(bare_content)
+            except Exception:
+                pass
+            try:
+                _REPO_TICKER_FILE.write_text(bare_content, encoding="utf-8")
+            except Exception:
+                pass
         except Exception:
-            pass  # read-only FS (shouldn't stop the scan)
+            pass
 
     return result
 
@@ -510,9 +530,9 @@ def _load_repo_tickers() -> set[str]:
 
 def _fetch_github_raw_lists() -> set[str]:
     """
-    JUGAAD FIX: uses _GITHUB_HEADERS (no NSE Referer) and 20s timeout.
-    Tries a session.get() warm-up first.
-    FIX: Tries ALL URLs (no break-early) to maximise ticker count.
+    Try all GitHub URLs and combine results for maximum ticker count.
+    Uses _GITHUB_HEADERS (no NSE Referer) and 20s timeout.
+    FIX: removed break-early — all URLs are tried regardless of count.
     """
     tickers: set[str] = set()
     try:
