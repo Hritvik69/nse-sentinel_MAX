@@ -871,81 +871,120 @@ hr { border-color:var(--border) !important; }
 # ─────────────────────────────────────────────────────────────────────
 # NSE TICKER LOADER
 # ─────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=86400, show_spinner=False)   # FIX: 24 h (was 6 h)
-def fetch_nse_tickers() -> list:
-    """
-    Load the scan universe from the shared ticker-universe module.
 
-    The universe module combines:
-    - the committed `nse_tickers.txt` file
-    - its curated hardcoded fallback list
-    - GitHub raw ticker lists when reachable
-    - NSE direct endpoints when reachable
+# Path where we persist the large ticker list inside the container.
+# /tmp/ is writable on Streamlit Cloud and survives within a single
+# server run (i.e. across Streamlit "reruns" / page refreshes).
+_TMP_TICKER_CACHE_PATH = "/tmp/nse_sentinel_tickers.txt"
+_TICKER_GOOD_COUNT     = 2000   # minimum for a "full" list
 
-    FIX: result is also stored in st.session_state as a permanent
-    backup so that a TTL-expiry mid-session never drops the count.
-    """
-    fallback = [
-        "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS","HINDUNILVR.NS",
-        "SBIN.NS","BHARTIARTL.NS","ITC.NS","KOTAKBANK.NS","LT.NS","AXISBANK.NS",
-        "ASIANPAINT.NS","MARUTI.NS","BAJFINANCE.NS","HCLTECH.NS","SUNPHARMA.NS",
-        "TITAN.NS","ULTRACEMCO.NS","ONGC.NS","NESTLEIND.NS","WIPRO.NS",
-        "POWERGRID.NS","NTPC.NS","TECHM.NS","INDUSINDBK.NS","ADANIPORTS.NS",
-        "TATAMOTORS.NS","JSWSTEEL.NS","BAJAJFINSV.NS","HINDALCO.NS","GRASIM.NS",
-        "DIVISLAB.NS","CIPLA.NS","DRREDDY.NS","BPCL.NS","EICHERMOT.NS",
-        "APOLLOHOSP.NS","TATACONSUM.NS","BRITANNIA.NS","COALINDIA.NS",
-        "HEROMOTOCO.NS","SHREECEM.NS","SBILIFE.NS","HDFCLIFE.NS","ADANIENT.NS",
-        "BAJAJ-AUTO.NS","TATASTEEL.NS","UPL.NS","M&M.NS",
-    ]
 
-    # ── FIX: session-state fast-path ─────────────────────────────────
-    # If we already have a large list in this session (from a previous
-    # call before TTL expiry), return it immediately without any network
-    # call.  This prevents the 2985 → 1524 drop that happens when the
-    # 6-hour cache expires and GitHub is rate-limited.
-    _ss_tickers = st.session_state.get("_full_ticker_list", [])
-    if len(_ss_tickers) >= 2000:
-        return _ss_tickers
-
+def _tmp_write_tickers(tickers: list) -> None:
+    """Save ticker list to /tmp/ so it survives in-process restarts."""
     try:
-        from nse_ticker_universe import get_all_tickers as _get_all_tickers
-        from nse_ticker_universe import invalidate_cache as _invalidate_ticker_cache
-    except Exception:
-        _get_all_tickers = None
-        _invalidate_ticker_cache = None
-
-    if _get_all_tickers is not None:
-        try:
-            tickers = _get_all_tickers(live=True)
-            if len(tickers) >= 1000:
-                # ── FIX: persist to session_state so TTL-expiry can't hurt ──
-                if len(tickers) >= 2000:
-                    st.session_state["_full_ticker_list"] = tickers
-                return tickers
-            if _invalidate_ticker_cache is not None:
-                _invalidate_ticker_cache()
-            tickers = _get_all_tickers(live=False)
-            if tickers:
-                return tickers
-        except Exception:
-            pass
-
-    try:
-        import pathlib
-
-        ticker_file = pathlib.Path(__file__).with_name("nse_tickers.txt")
-        if ticker_file.exists():
-            symbols = {
-                f"{line.strip().upper().replace('.NS', '')}.NS"
-                for line in ticker_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-                if line.strip()
-            }
-            if symbols:
-                return sorted(symbols)
+        with open(_TMP_TICKER_CACHE_PATH, "w", encoding="utf-8") as _fh:
+            _fh.write("\n".join(tickers))
     except Exception:
         pass
 
-    return fallback
+
+def _tmp_read_tickers() -> list:
+    """Read ticker list from /tmp/. Returns [] if missing or too small."""
+    try:
+        import os
+        if not os.path.exists(_TMP_TICKER_CACHE_PATH):
+            return []
+        with open(_TMP_TICKER_CACHE_PATH, "r", encoding="utf-8") as _fh:
+            lines = [l.strip() for l in _fh.read().splitlines() if l.strip()]
+        return lines if len(lines) >= _TICKER_GOOD_COUNT else []
+    except Exception:
+        return []
+
+
+def _fetch_tickers_from_all_sources() -> list:
+    """
+    Try every source in priority order and return the largest list found.
+    Called at most ONCE per process lifetime (held in cache_resource).
+    """
+    # Source 1: /tmp/ file written by a previous fetch this server-run
+    _tmp = _tmp_read_tickers()
+    if len(_tmp) >= _TICKER_GOOD_COUNT:
+        return _tmp
+
+    # Source 2: nse_ticker_universe module (GitHub + NSE + repo txt)
+    try:
+        from nse_ticker_universe import get_all_tickers as _gat
+        from nse_ticker_universe import invalidate_cache as _inv
+        tickers = _gat(live=True)
+        if len(tickers) >= 1000:
+            if len(tickers) >= _TICKER_GOOD_COUNT:
+                _tmp_write_tickers(tickers)
+            return tickers
+        _inv()
+        tickers = _gat(live=False)
+        if tickers:
+            return tickers
+    except Exception:
+        pass
+
+    # Source 3: repo nse_tickers.txt read directly
+    try:
+        import pathlib
+        _tf = pathlib.Path(__file__).with_name("nse_tickers.txt")
+        if _tf.exists():
+            syms = sorted({
+                f"{l.strip().upper().replace('.NS','')}.NS"
+                for l in _tf.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if l.strip()
+            })
+            if syms:
+                return syms
+    except Exception:
+        pass
+
+    # Source 4: hardcoded Nifty-50 last resort
+    return [
+        "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS",
+        "HINDUNILVR.NS","SBIN.NS","BHARTIARTL.NS","ITC.NS","KOTAKBANK.NS",
+        "LT.NS","AXISBANK.NS","ASIANPAINT.NS","MARUTI.NS","BAJFINANCE.NS",
+        "HCLTECH.NS","SUNPHARMA.NS","TITAN.NS","ULTRACEMCO.NS","ONGC.NS",
+        "NESTLEIND.NS","WIPRO.NS","POWERGRID.NS","NTPC.NS","TECHM.NS",
+        "INDUSINDBK.NS","ADANIPORTS.NS","TATAMOTORS.NS","JSWSTEEL.NS",
+        "BAJAJFINSV.NS","HINDALCO.NS","GRASIM.NS","DIVISLAB.NS","CIPLA.NS",
+        "DRREDDY.NS","BPCL.NS","EICHERMOT.NS","APOLLOHOSP.NS","TATACONSUM.NS",
+        "BRITANNIA.NS","COALINDIA.NS","HEROMOTOCO.NS","SHREECEM.NS",
+        "SBILIFE.NS","HDFCLIFE.NS","ADANIENT.NS","BAJAJ-AUTO.NS",
+        "TATASTEEL.NS","UPL.NS","M&M.NS",
+    ]
+
+
+@st.cache_resource(show_spinner=False)
+def _ticker_resource_store() -> dict:
+    """
+    A module-level mutable dict cached with st.cache_resource.
+
+    KEY DIFFERENCE vs st.cache_data:
+      • cache_resource has NO TTL — it lives for the ENTIRE process lifetime.
+      • cache_data(ttl=...) re-runs the function after the TTL expires.
+        When GitHub returns 403 on re-run, the count drops from 2985 → 1524.
+      • cache_resource is never automatically cleared by Streamlit.
+
+    This is the root-cause fix. The dict holds the tickers loaded on
+    first startup and never drops them regardless of time elapsed.
+    """
+    tickers = _fetch_tickers_from_all_sources()
+    return {"tickers": tickers}
+
+
+def fetch_nse_tickers() -> list:
+    """
+    Return the NSE ticker universe for scanning.
+
+    Always returns the list loaded on first startup (via cache_resource).
+    Never re-fetches from GitHub after startup, so the count is stable.
+    """
+    store = _ticker_resource_store()
+    return store["tickers"]
 
 
 # ─────────────────────────────────────────────────────────────────────
